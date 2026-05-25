@@ -38,6 +38,8 @@ class RAGService:
         self.embedder = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
 
     async def ingest_pdf(self, file_path: str, source_name: str) -> int:
+        if not self.initialized:
+            await self.initialize()
         chunks = await asyncio.get_event_loop().run_in_executor(
             None, self._extract_pdf_chunks, file_path, source_name
         )
@@ -90,8 +92,8 @@ class RAGService:
         )
 
     async def retrieve(self, query: str, n_results: int = 3) -> List[str]:
-        if not self.initialized or not self.collection or not self.embedder:
-            return []
+        if not self.initialized:
+            return []  # No documents loaded yet — skip RAG silently
 
         count = self.collection.count()
         if count == 0:

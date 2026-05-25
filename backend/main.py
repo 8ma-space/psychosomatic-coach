@@ -13,8 +13,7 @@ load_dotenv()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize RAG in the background so startup isn't blocked by model download
-    asyncio.create_task(rag_service.initialize())
+    # RAG initializes lazily on first use — don't load model at startup
     yield
 
 
