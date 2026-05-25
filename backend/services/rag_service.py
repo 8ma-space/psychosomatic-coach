@@ -18,13 +18,20 @@ class RAGService:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         CHROMA_DIR.mkdir(parents=True, exist_ok=True)
         await asyncio.get_event_loop().run_in_executor(None, self._sync_initialize)
-        self.initialized = True
-        print("[RAG] Service initialized.")
+        if self.embedder is not None:
+            self.initialized = True
+            print("[RAG] Service initialized.")
+        else:
+            print("[RAG] Skipped — dependencies not available.")
 
     def _sync_initialize(self):
-        import chromadb
-        from chromadb.config import Settings
-        from sentence_transformers import SentenceTransformer
+        try:
+            import chromadb
+            from chromadb.config import Settings
+            from sentence_transformers import SentenceTransformer
+        except ImportError:
+            print("[RAG] chromadb/sentence-transformers not installed — RAG disabled.")
+            return
 
         self.client = chromadb.PersistentClient(
             path=str(CHROMA_DIR),
