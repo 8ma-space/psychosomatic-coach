@@ -2,6 +2,8 @@
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
+
 interface UseVoiceOptions {
   onTranscript: (text: string) => void;
   onSpeakingChange?: (speaking: boolean) => void;
@@ -14,11 +16,13 @@ export function useVoice({ onTranscript, onSpeakingChange }: UseVoiceOptions) {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const recognitionRef = useRef<any>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
 
+  // Set up speech recognition
   useEffect(() => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const SpeechRecognition = (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition;
-
     if (!SpeechRecognition) return;
 
     setIsSupported(true);
@@ -53,34 +57,68 @@ export function useVoice({ onTranscript, onSpeakingChange }: UseVoiceOptions) {
   }, []);
 
   const speak = useCallback(
-    (text: string) => {
-      if (!window.speechSynthesis) return;
-      window.speechSynthesis.cancel();
+    async (text: string) => {
+      if (!text.trim()) return;
 
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = 0.82;
-      utterance.pitch = 1.0;
-      utterance.volume = 0.9;
+      // Stop any current playback
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
+        audioUrlRef.current = null;
+      }
 
-      // Prefer a calm, clear English voice
-      const voices = window.speechSynthesis.getVoices();
-      const preferred = voices.find(v =>
-        v.lang.startsWith('en') &&
-        (v.name.includes('Samantha') || v.name.includes('Karen') || v.name.includes('Moira'))
-      );
-      if (preferred) utterance.voice = preferred;
+      setIsSpeaking(true);
+      onSpeakingChange?.(true);
 
-      utterance.onstart = () => { setIsSpeaking(true); onSpeakingChange?.(true); };
-      utterance.onend = () => { setIsSpeaking(false); onSpeakingChange?.(false); };
-      utterance.onerror = () => { setIsSpeaking(false); onSpeakingChange?.(false); };
+      try {
+        const resp = await fetch(`${API_URL}/api/tts/speak`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
 
-      window.speechSynthesis.speak(utterance);
+        if (!resp.ok) throw new Error(`TTS error ${resp.status}`);
+
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        audioUrlRef.current = url;
+
+        const audio = new Audio(url);
+        audioRef.current = audio;
+
+        audio.onended = () => {
+          setIsSpeaking(false);
+          onSpeakingChange?.(false);
+          URL.revokeObjectURL(url);
+          audioUrlRef.current = null;
+          audioRef.current = null;
+        };
+        audio.onerror = () => {
+          setIsSpeaking(false);
+          onSpeakingChange?.(false);
+        };
+
+        await audio.play();
+      } catch {
+        setIsSpeaking(false);
+        onSpeakingChange?.(false);
+      }
     },
     [onSpeakingChange]
   );
 
   const stopSpeaking = useCallback(() => {
-    window.speechSynthesis?.cancel();
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = null;
+    }
     setIsSpeaking(false);
     onSpeakingChange?.(false);
   }, [onSpeakingChange]);
