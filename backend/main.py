@@ -1,4 +1,5 @@
 import os
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,7 +13,8 @@ load_dotenv()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await rag_service.initialize()
+    # Initialize RAG in the background so startup isn't blocked by model download
+    asyncio.create_task(rag_service.initialize())
     yield
 
 
