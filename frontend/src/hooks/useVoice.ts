@@ -12,7 +12,8 @@ export function useVoice({ onTranscript, onSpeakingChange }: UseVoiceOptions) {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isSupported, setIsSupported] = useState(false);
 
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const recognitionRef = useRef<any>(null);
 
   useEffect(() => {
     const SpeechRecognition =
@@ -27,7 +28,7 @@ export function useVoice({ onTranscript, onSpeakingChange }: UseVoiceOptions) {
     recognition.interimResults = false;
     recognition.lang = 'en-US';
 
-    recognition.onresult = (event: SpeechRecognitionEvent) => {
+    recognition.onresult = (event: any) => {
       const transcript = event.results[0]?.[0]?.transcript ?? '';
       if (transcript) onTranscript(transcript);
     };
