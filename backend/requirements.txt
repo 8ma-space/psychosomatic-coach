@@ -8,7 +8,6 @@ python-dotenv>=1.0.1
 pydantic>=2.8.0
 aiofiles>=24.0.0
 httpx>=0.28.0
-# RAG dependencies — require >512MB RAM (paid Railway plan or local run):
-# chromadb>=0.5.0
-# sentence-transformers>=3.0.0
-# numpy>=1.26.0
+chromadb>=0.5.0
+sentence-transformers>=3.0.0
+numpy>=1.26.0
