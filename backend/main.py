@@ -41,8 +41,11 @@ app.include_router(tts.router, prefix="/api/tts", tags=["tts"])
 
 @app.get("/health")
 async def health_check():
+    chunks = rag_service.get_document_count()
     return {
         "status": "healthy",
         "rag_initialized": rag_service.initialized,
-        "knowledge_chunks": rag_service.get_document_count(),
+        "knowledge_chunks": chunks,
+        # Reminder visible in Railway logs if the volume loses data
+        "knowledge_status": "loaded" if chunks > 0 else "empty — re-ingest PDFs via POST /api/rag/ingest",
     }
