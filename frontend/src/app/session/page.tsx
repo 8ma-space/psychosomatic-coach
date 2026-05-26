@@ -43,7 +43,7 @@ export default function SessionPage() {
     []
   );
 
-  const { isListening, isSpeaking, isSupported, startListening, stopListening, speak, stopSpeaking } =
+  const { isListening, isSpeaking, isSupported, startListening, stopListening, speak, stopSpeaking, unlockAudio } =
     useVoice({
       onTranscript: handleTranscript,
     });
@@ -59,6 +59,7 @@ export default function SessionPage() {
 
   const handleConsentComplete = useCallback(
     async (c: ConsentRecord) => {
+      unlockAudio(); // unlock AudioContext on direct user gesture — keeps voice working for entire session
       setConsent(c);
       setCameraEnabled(c.camera_consent);
       try {
@@ -68,7 +69,7 @@ export default function SessionPage() {
         // error displayed in component
       }
     },
-    [startSession]
+    [startSession, unlockAudio]
   );
 
   const handleSend = useCallback(() => {

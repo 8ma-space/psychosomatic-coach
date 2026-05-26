@@ -16,8 +16,18 @@ export function useVoice({ onTranscript, onSpeakingChange }: UseVoiceOptions) {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const recognitionRef = useRef<any>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const audioUrlRef = useRef<string | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const sourceRef = useRef<AudioBufferSourceNode | null>(null);
+
+  // Unlock AudioContext on first user gesture — called by parent on "Start session"
+  const unlockAudio = useCallback(() => {
+    if (!audioCtxRef.current) {
+      audioCtxRef.current = new AudioContext();
+    }
+    if (audioCtxRef.current.state === 'suspended') {
+      audioCtxRef.current.resume();
+    }
+  }, []);
 
   // Set up speech recognition
   useEffect(() => {
@@ -42,6 +52,7 @@ export function useVoice({ onTranscript, onSpeakingChange }: UseVoiceOptions) {
   }, [onTranscript]);
 
   const startListening = useCallback(() => {
+    unlockAudio(); // ensure audio context is unlocked on mic button press too
     if (!recognitionRef.current || isListening) return;
     try {
       recognitionRef.current.start();
@@ -49,7 +60,7 @@ export function useVoice({ onTranscript, onSpeakingChange }: UseVoiceOptions) {
     } catch {
       setIsListening(false);
     }
-  }, [isListening]);
+  }, [isListening, unlockAudio]);
 
   const stopListening = useCallback(() => {
     recognitionRef.current?.stop();
@@ -61,13 +72,9 @@ export function useVoice({ onTranscript, onSpeakingChange }: UseVoiceOptions) {
       if (!text.trim()) return;
 
       // Stop any current playback
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
-      }
-      if (audioUrlRef.current) {
-        URL.revokeObjectURL(audioUrlRef.current);
-        audioUrlRef.current = null;
+      if (sourceRef.current) {
+        try { sourceRef.current.stop(); } catch { /* already stopped */ }
+        sourceRef.current = null;
       }
 
       setIsSpeaking(true);
@@ -82,26 +89,28 @@ export function useVoice({ onTranscript, onSpeakingChange }: UseVoiceOptions) {
 
         if (!resp.ok) throw new Error(`TTS error ${resp.status}`);
 
-        const blob = await resp.blob();
-        const url = URL.createObjectURL(blob);
-        audioUrlRef.current = url;
+        const arrayBuffer = await resp.arrayBuffer();
 
-        const audio = new Audio(url);
-        audioRef.current = audio;
+        // Use AudioContext — stays unlocked after initial user gesture
+        if (!audioCtxRef.current) {
+          audioCtxRef.current = new AudioContext();
+        }
+        const ctx = audioCtxRef.current;
+        if (ctx.state === 'suspended') await ctx.resume();
 
-        audio.onended = () => {
+        const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+        const source = ctx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(ctx.destination);
+        sourceRef.current = source;
+
+        source.onended = () => {
           setIsSpeaking(false);
           onSpeakingChange?.(false);
-          URL.revokeObjectURL(url);
-          audioUrlRef.current = null;
-          audioRef.current = null;
-        };
-        audio.onerror = () => {
-          setIsSpeaking(false);
-          onSpeakingChange?.(false);
+          sourceRef.current = null;
         };
 
-        await audio.play();
+        source.start(0);
       } catch {
         setIsSpeaking(false);
         onSpeakingChange?.(false);
@@ -111,17 +120,13 @@ export function useVoice({ onTranscript, onSpeakingChange }: UseVoiceOptions) {
   );
 
   const stopSpeaking = useCallback(() => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current = null;
-    }
-    if (audioUrlRef.current) {
-      URL.revokeObjectURL(audioUrlRef.current);
-      audioUrlRef.current = null;
+    if (sourceRef.current) {
+      try { sourceRef.current.stop(); } catch { /* already stopped */ }
+      sourceRef.current = null;
     }
     setIsSpeaking(false);
     onSpeakingChange?.(false);
   }, [onSpeakingChange]);
 
-  return { isListening, isSpeaking, isSupported, startListening, stopListening, speak, stopSpeaking };
+  return { isListening, isSpeaking, isSupported, startListening, stopListening, speak, stopSpeaking, unlockAudio };
 }
