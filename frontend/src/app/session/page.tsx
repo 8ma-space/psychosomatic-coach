@@ -10,14 +10,15 @@ import { ChatInterface } from '@/components/ChatInterface';
 import { CameraFeed } from '@/components/CameraFeed';
 import { VoiceInput } from '@/components/VoiceInput';
 import { SafetyPanel } from '@/components/SafetyPanel';
+import { AvatarDisplay } from '@/components/AvatarDisplay';
 import { useSession } from '@/hooks/useSession';
 import { useVoice } from '@/hooks/useVoice';
+import { useAvatar } from '@/hooks/useAvatar';
 import type { ConsentRecord, VisionSignals } from '@/lib/types';
 
 type AppState = 'consent' | 'session' | 'ended';
 
 // How long (ms) the user has to review / edit a voice transcript before it auto-sends.
-// Gives people with accents time to correct mis-recognitions without stopping the flow.
 const VOICE_SEND_DELAY_MS = 2500;
 
 export default function SessionPage() {
@@ -46,6 +47,20 @@ export default function SessionPage() {
     finishSession,
   } = useSession();
 
+  // ── Avatar (D-ID + ElevenLabs voice) ───────────────────────────────────
+  const {
+    videoRef: avatarVideoRef,
+    isConnected: avatarConnected,
+    isConnecting: avatarConnecting,
+    isSpeaking: avatarSpeaking,
+    avatarError,
+    connect: connectAvatar,
+    disconnect: disconnectAvatar,
+    speak: avatarSpeak,
+    stopSpeaking: avatarStop,
+  } = useAvatar();
+
+  // ── Voice (speech recognition + TTS fallback) ──────────────────────────
   // Cancel any pending auto-send (called when user manually types or sends)
   const cancelPendingSend = useCallback(() => {
     if (sendTimerRef.current) {
@@ -84,7 +99,7 @@ export default function SessionPage() {
     pendingTextRef.current = text;
   }, []);
 
-  // Final transcript: show in input + start the 2.5s correction window, then auto-send
+  // Final transcript: show in input + start the 2.5 s correction window, then auto-send
   const handleTranscript = useCallback(
     (text: string) => {
       setInputText(text);
@@ -96,14 +111,44 @@ export default function SessionPage() {
     [scheduleSend]
   );
 
-  const { isListening, isSpeaking, isSupported, startListening, stopListening, speak, stopSpeaking, unlockAudio } =
-    useVoice({
-      onTranscript: handleTranscript,
-      onInterimTranscript: handleInterimTranscript,
-    });
+  const {
+    isListening,
+    isSpeaking: ttsSpeaking,
+    isSupported,
+    startListening,
+    stopListening,
+    speak: ttsSpeak,
+    stopSpeaking: ttsStop,
+    unlockAudio,
+  } = useVoice({
+    onTranscript: handleTranscript,
+    onInterimTranscript: handleInterimTranscript,
+  });
 
-  // After AI finishes speaking, automatically open the mic (voice conversation loop).
-  // Don't open while a send is pending — let the user finish reviewing first.
+  // Combined speaking flag — avatar takes priority; fall back to TTS if avatar fails
+  const isSpeaking = avatarSpeaking || ttsSpeaking;
+
+  // ── Speak last AI message ───────────────────────────────────────────────
+  // ID-deduplicated so the same message is only spoken once.
+  const lastSpokenIdRef = useRef('');
+  useEffect(() => {
+    if (!consent?.audio_consent) return;
+    const last = messages.at(-1);
+    if (!last || last.role !== 'assistant' || !last.content) return;
+    if (last.isStreaming) return;
+    if (last.id === lastSpokenIdRef.current) return;
+    lastSpokenIdRef.current = last.id;
+
+    // Prefer avatar; if it has a hard error use ElevenLabs TTS as fallback
+    if (!avatarError) {
+      avatarSpeak(last.content);
+    } else {
+      ttsSpeak(last.content);
+    }
+  }, [isStreaming, messages, consent?.audio_consent, avatarSpeak, ttsSpeak, avatarError]);
+
+  // ── Auto-listen loop after speaking ends ───────────────────────────────
+  // Don't open mic while a send is pending — let the user finish reviewing first.
   const hasSpokenRef = useRef(false);
   useEffect(() => {
     if (isSpeaking) {
@@ -115,29 +160,25 @@ export default function SessionPage() {
     if (appState !== 'session') return;
     if (isStreaming) return;
     if (isListening) return;
-    if (pendingSend) return; // wait for the correction window to resolve
+    if (pendingSend) return;
 
     const timer = setTimeout(() => startListening(), 700);
     return () => clearTimeout(timer);
   }, [isSpeaking, isStreaming, isListening, pendingSend, consent?.audio_consent, appState, startListening]);
 
-  // Speak last AI message when streaming ends.
-  const lastSpokenIdRef = useRef('');
-  useEffect(() => {
-    if (!consent?.audio_consent) return;
-    const last = messages.at(-1);
-    if (!last || last.role !== 'assistant' || !last.content) return;
-    if (last.isStreaming) return;
-    if (last.id === lastSpokenIdRef.current) return;
-    lastSpokenIdRef.current = last.id;
-    speak(last.content);
-  }, [isStreaming, messages, consent?.audio_consent, speak]);
-
+  // ── Consent complete ────────────────────────────────────────────────────
   const handleConsentComplete = useCallback(
     async (c: ConsentRecord) => {
       unlockAudio();
       setConsent(c);
       setCameraEnabled(c.camera_consent);
+
+      // Start the WebRTC connection eagerly so Fiona is ready by the time the
+      // opening message arrives.
+      if (c.audio_consent) {
+        connectAvatar();
+      }
+
       try {
         await startSession(c);
         setAppState('session');
@@ -145,9 +186,10 @@ export default function SessionPage() {
         // error displayed in component
       }
     },
-    [startSession, unlockAudio]
+    [startSession, unlockAudio, connectAvatar]
   );
 
+  // ── Message send helpers ────────────────────────────────────────────────
   const handleSend = useCallback(() => {
     cancelPendingSend();
     const text = inputText.trim();
@@ -178,19 +220,25 @@ export default function SessionPage() {
   const handleEndSession = useCallback(async () => {
     cancelPendingSend();
     await finishSession();
+    disconnectAvatar();
     setAppState('ended');
-  }, [cancelPendingSend, finishSession]);
+  }, [cancelPendingSend, finishSession, disconnectAvatar]);
 
   const handleGrounding = useCallback(() => {
     sendMessage("I'd like a grounding exercise, please.");
   }, [sendMessage]);
 
-  // Consent step
+  const handleStopSpeaking = useCallback(() => {
+    avatarStop();
+    ttsStop();
+  }, [avatarStop, ttsStop]);
+
+  // ── Consent step ────────────────────────────────────────────────────────
   if (appState === 'consent') {
     return <ConsentFlow onComplete={handleConsentComplete} />;
   }
 
-  // Ended state
+  // ── Ended state ─────────────────────────────────────────────────────────
   if (appState === 'ended') {
     return (
       <div className="min-h-screen bg-stone-50 flex items-center justify-center p-4">
@@ -214,7 +262,11 @@ export default function SessionPage() {
               Home
             </button>
             <button
-              onClick={() => { setAppState('consent'); setInputText(''); cancelPendingSend(); }}
+              onClick={() => {
+                setAppState('consent');
+                setInputText('');
+                cancelPendingSend();
+              }}
               className="flex-1 py-2.5 rounded-xl bg-sage-600 hover:bg-sage-700 text-white text-sm font-medium transition-colors"
             >
               New session
@@ -225,7 +277,7 @@ export default function SessionPage() {
     );
   }
 
-  // Active session
+  // ── Active session ───────────────────────────────────────────────────────
   return (
     <div className="h-screen flex flex-col bg-stone-50">
       <SafetyPanel
@@ -250,8 +302,69 @@ export default function SessionPage() {
       </AnimatePresence>
 
       <div className="flex-1 overflow-hidden flex">
-        {/* Chat area */}
+
+        {/* ── Avatar side-panel (desktop) ──────────────────────────── */}
+        <div className="hidden lg:flex w-72 flex-col items-center border-r border-stone-200 bg-white px-4 py-6 gap-6 overflow-y-auto">
+          <AvatarDisplay
+            videoRef={avatarVideoRef}
+            isConnected={avatarConnected}
+            isConnecting={avatarConnecting}
+            isSpeaking={avatarSpeaking}
+          />
+
+          {/* Avatar error hint */}
+          {avatarError && (
+            <p className="text-[10px] text-amber-500 text-center leading-relaxed px-2">
+              Avatar unavailable — voice-only mode active
+            </p>
+          )}
+
+          {/* Camera feed */}
+          <div className="w-full space-y-2">
+            <h3 className="text-xs font-medium text-stone-500 uppercase tracking-wide">
+              Your camera
+            </h3>
+            <CameraFeed
+              enabled={cameraEnabled}
+              onSignals={handleVisionSignals}
+              onToggle={setCameraEnabled}
+            />
+            {!cameraEnabled && (
+              <p className="text-xs text-stone-400 leading-relaxed">
+                Camera off — coach adapts to your text responses.
+              </p>
+            )}
+          </div>
+
+          <div className="mt-auto text-center space-y-1">
+            <p className="text-[10px] text-stone-300 leading-relaxed">
+              All analysis runs locally in your browser.
+            </p>
+          </div>
+        </div>
+
+        {/* ── Main: chat + input ───────────────────────────────────── */}
         <div className="flex-1 flex flex-col min-w-0">
+
+          {/* Mobile: compact avatar strip */}
+          <div className="lg:hidden flex items-center gap-3 px-4 py-2 border-b border-stone-200 bg-white">
+            <AvatarDisplay
+              videoRef={avatarVideoRef}
+              isConnected={avatarConnected}
+              isConnecting={avatarConnecting}
+              isSpeaking={avatarSpeaking}
+              compact
+            />
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-stone-700">Fiona</p>
+              <p className="text-xs text-stone-400">Psychosomatic Coach</p>
+              {avatarError && (
+                <p className="text-[10px] text-amber-500">Voice-only mode</p>
+              )}
+            </div>
+          </div>
+
+          {/* Chat transcript */}
           <div className="flex-1 overflow-hidden">
             <ChatInterface
               messages={messages}
@@ -260,7 +373,7 @@ export default function SessionPage() {
             />
           </div>
 
-          {/* Input area */}
+          {/* ── Input area ─────────────────────────────────────────── */}
           <div className="border-t border-stone-200 bg-white px-4 py-3">
             <div className="flex items-end gap-2 max-w-3xl mx-auto">
               <VoiceInput
@@ -269,7 +382,7 @@ export default function SessionPage() {
                 isSupported={isSupported && (consent?.audio_consent ?? false)}
                 onStartListening={startListening}
                 onStopListening={stopListening}
-                onStopSpeaking={stopSpeaking}
+                onStopSpeaking={handleStopSpeaking}
               />
 
               <div className="flex-1 relative">
@@ -279,14 +392,13 @@ export default function SessionPage() {
                   onChange={e => {
                     setInputText(e.target.value);
                     pendingTextRef.current = e.target.value;
-                    // User is manually editing — cancel the auto-send timer
                     cancelPendingSend();
                   }}
                   onKeyDown={handleKeyDown}
                   placeholder={
                     isStreaming    ? 'Coach is responding…' :
                     isListening    ? 'Listening… speak now' :
-                    isSpeaking     ? 'Coach is speaking…' :
+                    isSpeaking     ? 'Fiona is speaking…' :
                     pendingSend    ? 'Edit to correct, or press Enter to send now…' :
                     consent?.audio_consent ? 'Speak or type your response…' :
                     'Type your message…'
@@ -333,30 +445,6 @@ export default function SessionPage() {
                 'Connecting...'
               )}
             </p>
-          </div>
-        </div>
-
-        {/* Side panel */}
-        <div className="hidden lg:flex w-72 flex-col border-l border-stone-200 bg-white p-4 space-y-4 overflow-y-auto">
-          <h3 className="text-xs font-medium text-stone-500 uppercase tracking-wide">
-            Observation
-          </h3>
-
-          <CameraFeed
-            enabled={cameraEnabled}
-            onSignals={handleVisionSignals}
-            onToggle={setCameraEnabled}
-          />
-
-          {!cameraEnabled && (
-            <p className="text-xs text-stone-400 leading-relaxed">
-              Camera is off. The coach will adapt based on your text responses only.
-            </p>
-          )}
-
-          <div className="mt-auto space-y-1 border-t border-stone-100 pt-4">
-            <p className="text-xs text-stone-400">Session info</p>
-            <p className="text-xs text-stone-300">All analysis runs locally in your browser.</p>
           </div>
         </div>
       </div>

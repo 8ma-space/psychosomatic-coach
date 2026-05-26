@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-from routers import session, rag, tts
+from routers import session, rag, tts, avatar
 from services.rag_service import rag_service
 
 load_dotenv()
@@ -37,6 +37,7 @@ app.add_middleware(
 app.include_router(session.router, prefix="/api/sessions", tags=["sessions"])
 app.include_router(rag.router, prefix="/api/rag", tags=["knowledge"])
 app.include_router(tts.router, prefix="/api/tts", tags=["tts"])
+app.include_router(avatar.router, prefix="/api/avatar", tags=["avatar"])
 
 
 @app.get("/health")
