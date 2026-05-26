@@ -16,13 +16,23 @@ import type { ConsentRecord, VisionSignals } from '@/lib/types';
 
 type AppState = 'consent' | 'session' | 'ended';
 
+// How long (ms) the user has to review / edit a voice transcript before it auto-sends.
+// Gives people with accents time to correct mis-recognitions without stopping the flow.
+const VOICE_SEND_DELAY_MS = 2500;
+
 export default function SessionPage() {
   const router = useRouter();
   const [appState, setAppState] = useState<AppState>('consent');
   const [consent, setConsent] = useState<ConsentRecord | null>(null);
   const [cameraEnabled, setCameraEnabled] = useState(false);
   const [inputText, setInputText] = useState('');
+  const [pendingSend, setPendingSend] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Timer for the voice auto-send delay
+  const sendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Keeps the latest input value accessible inside timer callbacks without stale closures
+  const pendingTextRef = useRef('');
 
   const {
     messages,
@@ -36,64 +46,96 @@ export default function SessionPage() {
     finishSession,
   } = useSession();
 
+  // Cancel any pending auto-send (called when user manually types or sends)
+  const cancelPendingSend = useCallback(() => {
+    if (sendTimerRef.current) {
+      clearTimeout(sendTimerRef.current);
+      sendTimerRef.current = null;
+    }
+    setPendingSend(false);
+  }, []);
+
+  // Schedule an auto-send after VOICE_SEND_DELAY_MS — user can edit before it fires
+  const scheduleSend = useCallback((text: string) => {
+    cancelPendingSend();
+    pendingTextRef.current = text;
+    setPendingSend(true);
+    sendTimerRef.current = setTimeout(() => {
+      const toSend = pendingTextRef.current.trim();
+      if (toSend) {
+        sendMessage(toSend);
+        setInputText('');
+        pendingTextRef.current = '';
+      }
+      setPendingSend(false);
+      sendTimerRef.current = null;
+    }, VOICE_SEND_DELAY_MS);
+  }, [cancelPendingSend, sendMessage]);
+
   // Use a ref so handleTranscript stays stable (avoids recreating SpeechRecognition on every render)
   const audioConsentRef = useRef<boolean>(false);
   useEffect(() => {
     audioConsentRef.current = consent?.audio_consent ?? false;
   }, [consent?.audio_consent]);
 
+  // Interim (partial) transcript: show in real-time while user is still speaking
+  const handleInterimTranscript = useCallback((text: string) => {
+    setInputText(text);
+    pendingTextRef.current = text;
+  }, []);
+
+  // Final transcript: show in input + start the 2.5s correction window, then auto-send
   const handleTranscript = useCallback(
     (text: string) => {
+      setInputText(text);
+      pendingTextRef.current = text;
       if (audioConsentRef.current) {
-        // Voice conversation mode — auto-send immediately
-        sendMessage(text);
-      } else {
-        // Text mode — put in input for manual review/send
-        setInputText(text);
+        scheduleSend(text);
       }
     },
-    [sendMessage]
+    [scheduleSend]
   );
 
   const { isListening, isSpeaking, isSupported, startListening, stopListening, speak, stopSpeaking, unlockAudio } =
     useVoice({
       onTranscript: handleTranscript,
+      onInterimTranscript: handleInterimTranscript,
     });
 
-  // After AI finishes speaking, automatically open the mic (voice conversation loop)
+  // After AI finishes speaking, automatically open the mic (voice conversation loop).
+  // Don't open while a send is pending — let the user finish reviewing first.
   const hasSpokenRef = useRef(false);
   useEffect(() => {
     if (isSpeaking) {
-      hasSpokenRef.current = true; // mark that at least one TTS playback has happened
+      hasSpokenRef.current = true;
       return;
     }
-    if (!hasSpokenRef.current) return;   // don't trigger before first message
-    if (!consent?.audio_consent) return; // only in voice mode
+    if (!hasSpokenRef.current) return;
+    if (!consent?.audio_consent) return;
     if (appState !== 'session') return;
-    if (isStreaming) return;             // AI is still generating — wait
-    if (isListening) return;             // already listening
+    if (isStreaming) return;
+    if (isListening) return;
+    if (pendingSend) return; // wait for the correction window to resolve
 
-    const timer = setTimeout(() => startListening(), 700); // brief pause after speech ends
+    const timer = setTimeout(() => startListening(), 700);
     return () => clearTimeout(timer);
-  }, [isSpeaking, isStreaming, isListening, consent?.audio_consent, appState, startListening]);
+  }, [isSpeaking, isStreaming, isListening, pendingSend, consent?.audio_consent, appState, startListening]);
 
   // Speak last AI message when streaming ends.
-  // Track by message ID so the same message is never spoken twice even if the
-  // effect fires multiple times (messages ref change + isStreaming change).
   const lastSpokenIdRef = useRef('');
   useEffect(() => {
     if (!consent?.audio_consent) return;
     const last = messages.at(-1);
     if (!last || last.role !== 'assistant' || !last.content) return;
     if (last.isStreaming) return;
-    if (last.id === lastSpokenIdRef.current) return; // already spoken
+    if (last.id === lastSpokenIdRef.current) return;
     lastSpokenIdRef.current = last.id;
     speak(last.content);
   }, [isStreaming, messages, consent?.audio_consent, speak]);
 
   const handleConsentComplete = useCallback(
     async (c: ConsentRecord) => {
-      unlockAudio(); // unlock AudioContext on direct user gesture — keeps voice working for entire session
+      unlockAudio();
       setConsent(c);
       setCameraEnabled(c.camera_consent);
       try {
@@ -107,12 +149,14 @@ export default function SessionPage() {
   );
 
   const handleSend = useCallback(() => {
+    cancelPendingSend();
     const text = inputText.trim();
     if (!text || isStreaming) return;
     sendMessage(text);
     setInputText('');
+    pendingTextRef.current = '';
     inputRef.current?.focus();
-  }, [inputText, isStreaming, sendMessage]);
+  }, [cancelPendingSend, inputText, isStreaming, sendMessage]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -132,9 +176,10 @@ export default function SessionPage() {
   );
 
   const handleEndSession = useCallback(async () => {
+    cancelPendingSend();
     await finishSession();
     setAppState('ended');
-  }, [finishSession]);
+  }, [cancelPendingSend, finishSession]);
 
   const handleGrounding = useCallback(() => {
     sendMessage("I'd like a grounding exercise, please.");
@@ -169,7 +214,7 @@ export default function SessionPage() {
               Home
             </button>
             <button
-              onClick={() => { setAppState('consent'); setInputText(''); }}
+              onClick={() => { setAppState('consent'); setInputText(''); cancelPendingSend(); }}
               className="flex-1 py-2.5 rounded-xl bg-sage-600 hover:bg-sage-700 text-white text-sm font-medium transition-colors"
             >
               New session
@@ -183,14 +228,12 @@ export default function SessionPage() {
   // Active session
   return (
     <div className="h-screen flex flex-col bg-stone-50">
-      {/* Safety panel + header */}
       <SafetyPanel
         pacingAction={pacingAction}
         onEndSession={handleEndSession}
         onSendGrounding={handleGrounding}
       />
 
-      {/* Error banner */}
       <AnimatePresence>
         {error && (
           <motion.div
@@ -206,7 +249,6 @@ export default function SessionPage() {
         )}
       </AnimatePresence>
 
-      {/* Main layout */}
       <div className="flex-1 overflow-hidden flex">
         {/* Chat area */}
         <div className="flex-1 flex flex-col min-w-0">
@@ -234,18 +276,26 @@ export default function SessionPage() {
                 <textarea
                   ref={inputRef}
                   value={inputText}
-                  onChange={e => setInputText(e.target.value)}
+                  onChange={e => {
+                    setInputText(e.target.value);
+                    pendingTextRef.current = e.target.value;
+                    // User is manually editing — cancel the auto-send timer
+                    cancelPendingSend();
+                  }}
                   onKeyDown={handleKeyDown}
                   placeholder={
-                    isStreaming ? 'Coach is responding…' :
-                    isListening ? 'Listening… speak now' :
-                    isSpeaking  ? 'Coach is speaking…' :
+                    isStreaming    ? 'Coach is responding…' :
+                    isListening    ? 'Listening… speak now' :
+                    isSpeaking     ? 'Coach is speaking…' :
+                    pendingSend    ? 'Edit to correct, or press Enter to send now…' :
                     consent?.audio_consent ? 'Speak or type your response…' :
                     'Type your message…'
                   }
                   disabled={isStreaming || !isConnected}
                   rows={1}
-                  className="w-full resize-none rounded-xl border border-stone-200 px-4 py-2.5 text-sm text-stone-800 placeholder-stone-400 focus:outline-none focus:ring-2 focus:ring-sage-400 focus:border-transparent transition-shadow disabled:opacity-50 max-h-32 overflow-y-auto"
+                  className={`w-full resize-none rounded-xl border px-4 py-2.5 text-sm text-stone-800 placeholder-stone-400 focus:outline-none focus:ring-2 focus:ring-sage-400 focus:border-transparent transition-shadow disabled:opacity-50 max-h-32 overflow-y-auto ${
+                    pendingSend ? 'border-sage-300 bg-sage-50' : 'border-stone-200'
+                  }`}
                   style={{ lineHeight: '1.5' }}
                 />
               </div>
@@ -258,6 +308,20 @@ export default function SessionPage() {
                 <Send className="w-4 h-4" />
               </button>
             </div>
+
+            {/* Accent correction hint — shown during the auto-send countdown */}
+            <AnimatePresence>
+              {pendingSend && (
+                <motion.p
+                  initial={{ opacity: 0, y: -4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  className="text-center text-xs text-sage-600 mt-1"
+                >
+                  Sending in a moment — edit above if it heard you wrong, or press Enter to send now
+                </motion.p>
+              )}
+            </AnimatePresence>
 
             <p className="text-center text-xs text-stone-400 mt-2">
               {isConnected ? (
@@ -272,7 +336,7 @@ export default function SessionPage() {
           </div>
         </div>
 
-        {/* Side panel — camera + signals */}
+        {/* Side panel */}
         <div className="hidden lg:flex w-72 flex-col border-l border-stone-200 bg-white p-4 space-y-4 overflow-y-auto">
           <h3 className="text-xs font-medium text-stone-500 uppercase tracking-wide">
             Observation
