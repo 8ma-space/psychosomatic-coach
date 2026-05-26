@@ -36,17 +36,46 @@ export default function SessionPage() {
     finishSession,
   } = useSession();
 
+  // Use a ref so handleTranscript stays stable (avoids recreating SpeechRecognition on every render)
+  const audioConsentRef = useRef<boolean>(false);
+  useEffect(() => {
+    audioConsentRef.current = consent?.audio_consent ?? false;
+  }, [consent?.audio_consent]);
+
   const handleTranscript = useCallback(
     (text: string) => {
-      setInputText(text);
+      if (audioConsentRef.current) {
+        // Voice conversation mode — auto-send immediately
+        sendMessage(text);
+      } else {
+        // Text mode — put in input for manual review/send
+        setInputText(text);
+      }
     },
-    []
+    [sendMessage]
   );
 
   const { isListening, isSpeaking, isSupported, startListening, stopListening, speak, stopSpeaking, unlockAudio } =
     useVoice({
       onTranscript: handleTranscript,
     });
+
+  // After AI finishes speaking, automatically open the mic (voice conversation loop)
+  const hasSpokenRef = useRef(false);
+  useEffect(() => {
+    if (isSpeaking) {
+      hasSpokenRef.current = true; // mark that at least one TTS playback has happened
+      return;
+    }
+    if (!hasSpokenRef.current) return;   // don't trigger before first message
+    if (!consent?.audio_consent) return; // only in voice mode
+    if (appState !== 'session') return;
+    if (isStreaming) return;             // AI is still generating — wait
+    if (isListening) return;             // already listening
+
+    const timer = setTimeout(() => startListening(), 700); // brief pause after speech ends
+    return () => clearTimeout(timer);
+  }, [isSpeaking, isStreaming, isListening, consent?.audio_consent, appState, startListening]);
 
   // Speak last AI message when streaming ends
   useEffect(() => {
@@ -202,7 +231,13 @@ export default function SessionPage() {
                   value={inputText}
                   onChange={e => setInputText(e.target.value)}
                   onKeyDown={handleKeyDown}
-                  placeholder={isStreaming ? 'Coach is responding...' : 'Type or speak...'}
+                  placeholder={
+                    isStreaming ? 'Coach is responding…' :
+                    isListening ? 'Listening… speak now' :
+                    isSpeaking  ? 'Coach is speaking…' :
+                    consent?.audio_consent ? 'Speak or type your response…' :
+                    'Type your message…'
+                  }
                   disabled={isStreaming || !isConnected}
                   rows={1}
                   className="w-full resize-none rounded-xl border border-stone-200 px-4 py-2.5 text-sm text-stone-800 placeholder-stone-400 focus:outline-none focus:ring-2 focus:ring-sage-400 focus:border-transparent transition-shadow disabled:opacity-50 max-h-32 overflow-y-auto"
