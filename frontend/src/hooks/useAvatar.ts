@@ -212,7 +212,7 @@ export function useAvatar({ onSpeakingChange }: UseAvatarOptions = {}) {
 
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Avatar connection failed';
-      console.error('[useAvatar] connect error:', msg);
+      console.error('[useAvatar] connect error (open DevTools → Console for details):', msg);
       setAvatarError(msg);
       setIsConnecting(false);
       if (pcRef.current) { pcRef.current.close(); pcRef.current = null; }

@@ -3,9 +3,12 @@
 import { type RefObject } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
-const FIONA_THUMBNAIL =
-  'https://clips-presenters.d-id.com/v2/fiona_pink_shirt_nature' +
-  '/YbSy_eGr0t/YK3poyBbmx/thumbnail.png';
+// Proxied through our backend so the browser never hits the auth-gated D-ID CDN directly
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
+const FIONA_THUMBNAIL = `${API_URL}/api/avatar/thumbnail`;
+// Generic fallback if even the proxy fails
+const FIONA_FALLBACK =
+  'https://ui-avatars.com/api/?name=Fiona&background=a3b899&color=fff&size=300&rounded=true&bold=true';
 
 interface AvatarDisplayProps {
   videoRef: RefObject<HTMLVideoElement>;
@@ -42,7 +45,8 @@ export function AvatarDisplay({
         {/* Thumbnail — always rendered underneath (fallback + fast initial load) */}
         <img
           src={FIONA_THUMBNAIL}
-          alt="Fiona – your psychosomatic coach"
+          alt="Fiona"
+          onError={e => { (e.target as HTMLImageElement).src = FIONA_FALLBACK; }}
           className="absolute inset-0 w-full h-full object-cover"
           draggable={false}
         />

@@ -7,11 +7,13 @@ Flow:
   3. POST   /streams/{id}/ice  → forward each ICE candidate as it's gathered
   4. POST   /streams/{id}/talk → send text; D-ID animates Fiona with ElevenLabs voice
   5. DELETE /streams/{id}      → close the session
+  6. GET    /thumbnail         → proxy Fiona's thumbnail (D-ID CDN requires auth)
 """
 
 import os
 import httpx
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -21,6 +23,7 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "ROMJ9yK1NAMuu1ggrjDW")
 
 # Fiona – nature presenter
+FIONA_PRESENTER_ID = "v2_public_fiona_pink_shirt_nature@YbSy_eGr0t"
 FIONA_THUMBNAIL = (
     "https://clips-presenters.d-id.com/v2/fiona_pink_shirt_nature"
     "/YbSy_eGr0t/YK3poyBbmx/thumbnail.png"
@@ -37,6 +40,31 @@ def _did_headers() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 0. Thumbnail proxy (D-ID CDN is auth-gated — browsers can't load it directly)
+# ---------------------------------------------------------------------------
+
+@router.get("/thumbnail")
+async def get_thumbnail():
+    """Proxy Fiona's thumbnail so the browser can display it without CORS/auth issues."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                FIONA_THUMBNAIL,
+                headers={"Authorization": f"Basic {DID_API_KEY}"} if DID_API_KEY else {},
+            )
+        if resp.is_success:
+            ct = resp.headers.get("content-type", "image/png")
+            return Response(content=resp.content, media_type=ct)
+    except Exception:
+        pass
+    # Fallback: redirect to a neutral placeholder so the UI never shows a broken image
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(
+        "https://ui-avatars.com/api/?name=Fiona&background=a3b899&color=fff&size=300&rounded=true&bold=true"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 1. Create stream
 # ---------------------------------------------------------------------------
 
@@ -46,17 +74,26 @@ async def create_stream():
     if not DID_API_KEY:
         raise HTTPException(status_code=503, detail="Avatar not configured (missing DID_API_KEY)")
 
+    # Try presenter_id first (preferred for D-ID built-in presenters).
+    # Fall back to source_url if presenter_id is rejected (older API versions).
+    payloads = [
+        {"presenter_id": FIONA_PRESENTER_ID},
+        {"source_url": FIONA_THUMBNAIL},
+    ]
+
+    last_error = ""
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            f"{DID_BASE}/talks/streams",
-            headers=_did_headers(),
-            json={"source_url": FIONA_THUMBNAIL},
-        )
+        for payload in payloads:
+            resp = await client.post(
+                f"{DID_BASE}/talks/streams",
+                headers=_did_headers(),
+                json=payload,
+            )
+            if resp.status_code in (200, 201):
+                return resp.json()
+            last_error = f"payload={list(payload.keys())[0]} status={resp.status_code} body={resp.text[:300]}"
 
-    if resp.status_code not in (200, 201):
-        raise HTTPException(status_code=502, detail=f"D-ID create error: {resp.text[:400]}")
-
-    return resp.json()
+    raise HTTPException(status_code=502, detail=f"D-ID create error: {last_error}")
 
 
 # ---------------------------------------------------------------------------
