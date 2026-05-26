@@ -38,11 +38,15 @@ export function useSession() {
         )
       );
     } else if (data.type === 'stream_end') {
-      if (streamingIdRef.current) {
+      // Capture ID into a local const BEFORE nulling the ref — the functional
+      // updater passed to setMessages runs after the event handler returns, so
+      // reading streamingIdRef.current inside the updater would see null.
+      const endId = streamingIdRef.current;
+      streamingIdRef.current = null;
+      if (endId) {
         setMessages(prev =>
-          prev.map(m => (m.id === streamingIdRef.current ? { ...m, isStreaming: false } : m))
+          prev.map(m => (m.id === endId ? { ...m, isStreaming: false } : m))
         );
-        streamingIdRef.current = null;
       }
       setIsStreaming(false);
       setPacingAction('continue');

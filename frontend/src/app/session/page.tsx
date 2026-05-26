@@ -77,14 +77,19 @@ export default function SessionPage() {
     return () => clearTimeout(timer);
   }, [isSpeaking, isStreaming, isListening, consent?.audio_consent, appState, startListening]);
 
-  // Speak last AI message when streaming ends
+  // Speak last AI message when streaming ends.
+  // Track by message ID so the same message is never spoken twice even if the
+  // effect fires multiple times (messages ref change + isStreaming change).
+  const lastSpokenIdRef = useRef('');
   useEffect(() => {
     if (!consent?.audio_consent) return;
     const last = messages.at(-1);
-    if (last?.role === 'assistant' && !last.isStreaming && last.content) {
-      speak(last.content);
-    }
-  }, [messages, consent?.audio_consent, speak]);
+    if (!last || last.role !== 'assistant' || !last.content) return;
+    if (last.isStreaming) return;
+    if (last.id === lastSpokenIdRef.current) return; // already spoken
+    lastSpokenIdRef.current = last.id;
+    speak(last.content);
+  }, [isStreaming, messages, consent?.audio_consent, speak]);
 
   const handleConsentComplete = useCallback(
     async (c: ConsentRecord) => {
